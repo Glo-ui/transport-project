@@ -276,45 +276,52 @@ def train_models(df):
     rf = results["Random Forest"]["model"]
     importances = pd.Series(rf.feature_importances_, index=feature_cols).sort_values(ascending=False)
 
-    # Forecasts
+    # Train a model for EACH demand category and generate forecasts
     forecast_years = [2025, 2026, 2027]
-    best_model = results[best_name]["model"]
-    forecasts = []
-    for county in df["County"].unique():
-        county_data = df[df["County"] == county].sort_values("Year").copy()
-        county_enc = le.transform([county])[0]
-        for year in forecast_years:
-            latest = county_data.iloc[-1]
-            second = county_data.iloc[-2] if len(county_data) > 1 else latest
-            features = {
-                "Year": year,
-                "Year_index": year - df["Year"].min(),
-                "County_encoded": county_enc,
-                "Road_Transport_growth": (
-                    (latest["Road Transport"] - second["Road Transport"])
-                    / second["Road Transport"]
-                ) if second["Road Transport"] != 0 else 0,
-            }
-            for col in demand_columns:
-                features[f"{col}_lag1"] = latest[col]
-                features[f"{col}_lag2"] = second[col]
-            X_f = pd.DataFrame([features])[feature_cols]
-            prediction = best_model.predict(X_f)[0]
-            forecasts.append({
-                "Year": year, "County": county,
-                "Predicted Road Transport (KSh M)": int(round(prediction)),
-            })
-            new_row = latest.copy()
-            new_row["Year"] = year
-            new_row["Road Transport"] = prediction
-            county_data = pd.concat([county_data, pd.DataFrame([new_row])], ignore_index=True)
+    all_forecasts = {}
 
-    forecast_df = pd.DataFrame(forecasts)
+    for target_cat in demand_columns:
+        # Train RF model for this category
+        y_cat = df_model[target_cat]
+        cat_model = RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42)
+        cat_model.fit(X_train, y_cat[train_mask])
 
-    return results, best_name, pred_df, importances, forecast_df, y_test, feature_cols
+        cat_forecasts = []
+        for county in df["County"].unique():
+            county_data = df[df["County"] == county].sort_values("Year").copy()
+            county_enc = le.transform([county])[0]
+            for year in forecast_years:
+                latest = county_data.iloc[-1]
+                second = county_data.iloc[-2] if len(county_data) > 1 else latest
+                features = {
+                    "Year": year,
+                    "Year_index": year - df["Year"].min(),
+                    "County_encoded": county_enc,
+                    "Road_Transport_growth": (
+                        (latest["Road Transport"] - second["Road Transport"])
+                        / second["Road Transport"]
+                    ) if second["Road Transport"] != 0 else 0,
+                }
+                for col in demand_columns:
+                    features[f"{col}_lag1"] = latest[col]
+                    features[f"{col}_lag2"] = second[col]
+                X_f = pd.DataFrame([features])[feature_cols]
+                prediction = cat_model.predict(X_f)[0]
+                cat_forecasts.append({
+                    "Year": year, "County": county,
+                    "Predicted": int(round(prediction)),
+                })
+                new_row = latest.copy()
+                new_row["Year"] = year
+                new_row[target_cat] = prediction
+                county_data = pd.concat([county_data, pd.DataFrame([new_row])], ignore_index=True)
+
+        all_forecasts[target_cat] = pd.DataFrame(cat_forecasts)
+
+    return results, best_name, pred_df, importances, all_forecasts, y_test, feature_cols, demand_columns
 
 
-results, best_name, pred_df, importances, forecast_df, y_test, feature_cols = train_models(
+results, best_name, pred_df, importances, all_forecasts, y_test, feature_cols, demand_columns = train_models(
     df_combined.copy()
 )
 
@@ -368,23 +375,32 @@ plt.close(fig6)
 # ── Section 4: Forecasting ───────────────────────────────────
 st.header("4. Demand Forecast (2025–2027)")
 
-pivot = forecast_df.pivot(
-    index="County", columns="Year", values="Predicted Road Transport (KSh M)"
+forecast_category = st.selectbox(
+    "Select transport category to forecast:",
+    demand_columns,
+    key="forecast_cat",
 )
+
+forecast_df = all_forecasts[forecast_category]
+
+# Units label
+unit_label = "KSh Millions" if forecast_category == "Road Transport" else "Vehicles"
+
+pivot = forecast_df.pivot(index="County", columns="Year", values="Predicted")
 st.dataframe(pivot, use_container_width=True)
 
 fig7, ax7 = plt.subplots(figsize=(14, 6))
 for county in df_combined["County"].unique():
     hist = df_combined[df_combined["County"] == county]
     fore = forecast_df[forecast_df["County"] == county]
-    ax7.plot(hist["Year"], hist["Road Transport"], marker="o", linewidth=2,
+    ax7.plot(hist["Year"], hist[forecast_category], marker="o", linewidth=2,
              label=f"{county} (actual)")
-    ax7.plot(fore["Year"], fore["Predicted Road Transport (KSh M)"], marker="s",
+    ax7.plot(fore["Year"], fore["Predicted"], marker="s",
              linewidth=2, linestyle="--", alpha=0.7)
 ax7.axvline(x=2024.5, color="gray", linestyle=":", alpha=0.5, label="Forecast boundary")
-ax7.set_title("Road Transport Demand: Historical + Forecast")
+ax7.set_title(f"{forecast_category}: Historical + Forecast")
 ax7.set_xlabel("Year")
-ax7.set_ylabel("Road Transport (KSh Millions)")
+ax7.set_ylabel(f"{forecast_category} ({unit_label})")
 ax7.legend(title="County", bbox_to_anchor=(1.05, 1), loc="upper left")
 ax7.grid(True, alpha=0.3)
 fig7.tight_layout()
