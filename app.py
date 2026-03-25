@@ -3,7 +3,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import LabelEncoder
 import warnings
@@ -26,24 +27,22 @@ st.markdown(
     "Team: Gloria Wanjiku Kamau — 1061409 | Cindy Mitchell Owoko — 1060318"
 )
 
-# ── Project Overview ─────────────────────────────────────────
+# ── 1. Project Overview ──────────────────────────────────────
 st.header("1. Project Overview")
 col_ov1, col_ov2 = st.columns([2, 1])
 with col_ov1:
     st.markdown(
         "This study predicts transportation demand in five Kenyan cities using "
-        "**decentralized machine learning**. Data from transport statistics, "
-        "population patterns, and activity levels is used to model demand "
-        "across urban areas.\n\n"
-        "Each city trains its own model independently, and predictions are "
-        "combined using **federated averaging**. This approach improves accuracy "
-        "while preserving data privacy and scalability."
+        "machine learning. Data from transport statistics, population patterns, "
+        "and activity levels is used to model demand across urban areas.\n\n"
+        "Multiple models are trained and compared — including a **decentralized "
+        "federated approach** where each city trains its own model and predictions "
+        "are combined via federated averaging, preserving data privacy."
     )
 with col_ov2:
-    st.info("**Key Innovation**\n\nDecentralized machine learning where cities "
-            "share *predictions*, not raw data.")
+    st.info("**Key Innovation**\n\nComparing centralized and decentralized ML — "
+            "cities share *predictions*, not raw data.")
 
-# Research objectives
 st.subheader("Research Objectives")
 obj_cols = st.columns(5)
 objectives = [
@@ -63,7 +62,6 @@ for i, (title, desc) in enumerate(objectives):
         st.metric(label=f"0{i+1}", value=title)
         st.caption(desc)
 
-# Why decentralized
 st.subheader("Why Decentralized Learning?")
 why_cols = st.columns(3)
 with why_cols[0]:
@@ -75,6 +73,11 @@ with why_cols[1]:
 with why_cols[2]:
     st.success("**Efficiency**\n\nLocal models train faster on relevant "
                "data without centralized bottlenecks.")
+st.markdown(
+    "Traditional centralized methods rely on pooling all data in one location, "
+    "which can be inefficient and raise privacy concerns. This study compares "
+    "both approaches to quantify the trade-offs."
+)
 
 
 # ── Data loading ─────────────────────────────────────────────
@@ -167,11 +170,12 @@ df_filtered = df_combined[
     & (df_combined["Year"].between(year_range[0], year_range[1]))
 ]
 
-# ── Section 2: Data Sources & EDA ────────────────────────────
+# ── 2. Data Sources & EDA ───────────────────────────────────
 st.header("2. Data Sources & Exploration")
 st.markdown(
-    "**Data Sources:** Transport statistics (KNBS), population distributions, "
-    "and activity-level indicators across five Kenyan urban areas."
+    "**Data Sources:** Transport statistics (KNBS Economic Surveys), "
+    "population distributions, and activity-level indicators across "
+    "five Kenyan urban areas: Kisumu, Mombasa, Nairobi, Nakuru, Uasin Gishu."
 )
 
 col1, col2, col3 = st.columns(3)
@@ -181,6 +185,8 @@ col3.metric("Year Span", f"{year_range[0]}–{year_range[1]}")
 
 with st.expander("View Raw Data"):
     st.dataframe(df_filtered, use_container_width=True)
+with st.expander("Descriptive Statistics"):
+    st.dataframe(df_filtered.describe().round(0), use_container_width=True)
 
 # Road Transport trend
 st.subheader("Road Transport Volume Over Time")
@@ -197,7 +203,7 @@ fig1.tight_layout()
 st.pyplot(fig1)
 plt.close(fig1)
 
-# Category selector for detailed plots
+# Category explorer
 st.subheader("Transport Category Trends")
 transport_categories = [c for c in DEMAND_COLUMNS if c != "Road Transport"]
 selected_category = st.selectbox("Select a transport category:", transport_categories)
@@ -227,136 +233,102 @@ fig3.tight_layout()
 st.pyplot(fig3)
 plt.close(fig3)
 
+# Box plots
+st.subheader("Distribution by County")
+selected_box = st.selectbox(
+    "Select category for box plot:",
+    ["Road Transport"] + transport_categories, key="box",
+)
+fig4, ax4 = plt.subplots(figsize=(10, 5))
+sns.boxplot(data=df_filtered, x="County", y=selected_box, palette="Set2", ax=ax4)
+ax4.set_title(f"{selected_box} Distribution by County")
+ax4.tick_params(axis="x", rotation=30)
+fig4.tight_layout()
+st.pyplot(fig4)
+plt.close(fig4)
 
-# ── Section 3: Decentralized Model Training ──────────────────
-st.header("3. Decentralized Model Training (Federated Learning)")
+
+# ── 3. Model Training & Evaluation (Centralized) ────────────
+st.header("3. Model Training & Evaluation")
 st.markdown(
-    "**Approach:** Random Forest models are trained **separately for each city** "
-    "(local models). Predictions from all city models are then combined using "
-    "**federated averaging** to produce a global prediction. This simulates a "
-    "federated learning system where raw data never leaves city boundaries."
+    "Three models are trained on the full consolidated dataset using a "
+    "time-based split: **2013–2021 for training**, **2022–2024 for testing**."
 )
 
 
 @st.cache_data
-def train_federated(df):
-    """Train per-city local models + federated average. Return all results."""
+def train_centralized(df):
     df = df.sort_values(["County", "Year"]).reset_index(drop=True)
     le = LabelEncoder()
     df["County_encoded"] = le.fit_transform(df["County"])
 
-    # Feature engineering
     for col in DEMAND_COLUMNS:
         df[f"{col}_lag1"] = df.groupby("County")[col].shift(1)
         df[f"{col}_lag2"] = df.groupby("County")[col].shift(2)
     df["Road_Transport_growth"] = df.groupby("County")["Road Transport"].pct_change()
     df["Year_index"] = df["Year"] - df["Year"].min()
 
-    feature_cols = ["Year", "Year_index", "Road_Transport_growth"]
+    target = "Road Transport"
+    feature_cols = ["Year", "Year_index", "County_encoded", "Road_Transport_growth"]
     feature_cols += [c for c in df.columns if "_lag1" in c or "_lag2" in c]
 
-    df_model = df.dropna(subset=feature_cols).copy()
+    df_model = df.dropna(subset=feature_cols + [target]).copy()
+    X = df_model[feature_cols]
+    y = df_model[target]
     train_mask = df_model["Year"] <= 2021
     test_mask = df_model["Year"] >= 2022
 
-    counties = df["County"].unique().tolist()
+    X_train, X_test = X[train_mask], X[test_mask]
+    y_train, y_test = y[train_mask], y[test_mask]
 
-    # ── Per-city local models (for Road Transport as primary target) ──
-    local_results = {}
-    local_test_preds = {}
-    for county in counties:
-        c_train = df_model[train_mask & (df_model["County"] == county)]
-        c_test = df_model[test_mask & (df_model["County"] == county)]
-        if len(c_train) < 3 or len(c_test) == 0:
-            continue
-        X_tr = c_train[feature_cols]
-        y_tr = c_train["Road Transport"]
-        X_te = c_test[feature_cols]
-        y_te = c_test["Road Transport"]
+    models = {
+        "Random Forest": RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42),
+        "Gradient Boosting": GradientBoostingRegressor(
+            n_estimators=200, max_depth=5, learning_rate=0.1, random_state=42),
+        "Linear Regression": LinearRegression(),
+    }
 
-        model = RandomForestRegressor(n_estimators=200, max_depth=6, random_state=42)
-        model.fit(X_tr, y_tr)
-        preds = model.predict(X_te)
-
-        mae = mean_absolute_error(y_te, preds)
-        rmse = np.sqrt(mean_squared_error(y_te, preds))
-        r2 = r2_score(y_te, preds) if len(y_te) > 1 else 0.0
-
-        local_results[county] = {"model": model, "mae": mae, "rmse": rmse, "r2": r2}
-        local_test_preds[county] = {
-            "y_true": y_te.values, "y_pred": preds,
-            "years": c_test["Year"].values,
+    results = {}
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        mae = mean_absolute_error(y_test, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        r2 = r2_score(y_test, y_pred)
+        mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
+        results[name] = {
+            "model": model, "predictions": y_pred,
+            "mae": mae, "rmse": rmse, "r2": r2, "mape": mape,
         }
 
-    # ── Federated model: average predictions from all local models ──
-    fed_preds_all = []
-    fed_true_all = []
-    fed_details = []
-    for county in counties:
-        c_test = df_model[test_mask & (df_model["County"] == county)]
-        if len(c_test) == 0:
-            continue
-        X_te = c_test[feature_cols]
-        y_te = c_test["Road Transport"]
+    best_name = max(results, key=lambda k: results[k]["r2"])
+    pred_df = df_model[test_mask][["Year", "County", "Road Transport"]].copy()
+    pred_df["Predicted"] = results[best_name]["predictions"].astype(int)
+    pred_df["Error_%"] = (
+        (pred_df["Road Transport"] - pred_df["Predicted"]) / pred_df["Road Transport"] * 100
+    ).round(1)
 
-        # Each local model predicts on this county's test data
-        all_preds = []
-        for c_name, c_res in local_results.items():
-            all_preds.append(c_res["model"].predict(X_te))
+    rf = results["Random Forest"]["model"]
+    importances = pd.Series(rf.feature_importances_, index=feature_cols).sort_values(ascending=False)
 
-        # Federated average
-        fed_pred = np.mean(all_preds, axis=0)
-        fed_preds_all.extend(fed_pred)
-        fed_true_all.extend(y_te.values)
-
-        for j in range(len(y_te)):
-            fed_details.append({
-                "Year": c_test["Year"].values[j], "County": county,
-                "Actual": int(y_te.values[j]), "Federated Pred": int(fed_pred[j]),
-            })
-
-    fed_true_arr = np.array(fed_true_all)
-    fed_pred_arr = np.array(fed_preds_all)
-    fed_mae = mean_absolute_error(fed_true_arr, fed_pred_arr)
-    fed_rmse = np.sqrt(mean_squared_error(fed_true_arr, fed_pred_arr))
-    fed_r2 = r2_score(fed_true_arr, fed_pred_arr)
-
-    # ── Centralized baseline (single model on all data) ──
-    X_train_all = df_model[train_mask][feature_cols]
-    y_train_all = df_model[train_mask]["Road Transport"]
-    X_test_all = df_model[test_mask][feature_cols]
-    y_test_all = df_model[test_mask]["Road Transport"]
-
-    central_model = RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42)
-    central_model.fit(X_train_all, y_train_all)
-    central_preds = central_model.predict(X_test_all)
-    central_mae = mean_absolute_error(y_test_all, central_preds)
-    central_rmse = np.sqrt(mean_squared_error(y_test_all, central_preds))
-    central_r2 = r2_score(y_test_all, central_preds)
-
-    # ── Per-category forecasts (using federated approach) ──
+    # Per-category forecasts using best centralized model approach
     forecast_years = [2025, 2026, 2027]
     all_forecasts = {}
     for target_cat in DEMAND_COLUMNS:
-        # Train local models per county for this category
-        cat_local_models = {}
-        for county in counties:
-            c_train = df_model[train_mask & (df_model["County"] == county)]
-            if len(c_train) < 3:
-                continue
-            m = RandomForestRegressor(n_estimators=200, max_depth=6, random_state=42)
-            m.fit(c_train[feature_cols], c_train[target_cat])
-            cat_local_models[county] = m
-
+        y_cat = df_model[target_cat]
+        cat_model = RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42)
+        cat_model.fit(X_train, y_cat[train_mask])
         cat_forecasts = []
-        for county in counties:
+        for county in df["County"].unique():
             county_data = df[df["County"] == county].sort_values("Year").copy()
+            county_enc = le.transform([county])[0]
             for year in forecast_years:
                 latest = county_data.iloc[-1]
                 second = county_data.iloc[-2] if len(county_data) > 1 else latest
                 features = {
                     "Year": year,
                     "Year_index": year - df["Year"].min(),
+                    "County_encoded": county_enc,
                     "Road_Transport_growth": (
                         (latest["Road Transport"] - second["Road Transport"])
                         / second["Road Transport"]
@@ -366,40 +338,139 @@ def train_federated(df):
                     features[f"{col}_lag1"] = latest[col]
                     features[f"{col}_lag2"] = second[col]
                 X_f = pd.DataFrame([features])[feature_cols]
-
-                # Federated average of all local models
-                preds = [m.predict(X_f)[0] for m in cat_local_models.values()]
-                prediction = np.mean(preds) if preds else 0
-
+                prediction = cat_model.predict(X_f)[0]
                 cat_forecasts.append({
-                    "Year": year, "County": county,
-                    "Predicted": int(round(prediction)),
+                    "Year": year, "County": county, "Predicted": int(round(prediction)),
                 })
                 new_row = latest.copy()
                 new_row["Year"] = year
                 new_row[target_cat] = prediction
-                county_data = pd.concat(
-                    [county_data, pd.DataFrame([new_row])], ignore_index=True
-                )
+                county_data = pd.concat([county_data, pd.DataFrame([new_row])], ignore_index=True)
         all_forecasts[target_cat] = pd.DataFrame(cat_forecasts)
 
-    # Feature importance from centralized model
-    importances = pd.Series(
-        central_model.feature_importances_, index=feature_cols
-    ).sort_values(ascending=False)
-
-    return (local_results, fed_mae, fed_rmse, fed_r2, pd.DataFrame(fed_details),
-            central_mae, central_rmse, central_r2,
-            importances, all_forecasts, local_test_preds, feature_cols)
+    return results, best_name, pred_df, importances, all_forecasts, y_test, feature_cols, df_model, le
 
 
-(local_results, fed_mae, fed_rmse, fed_r2, fed_details_df,
- central_mae, central_rmse, central_r2,
- importances, all_forecasts, local_test_preds, feature_cols) = train_federated(
-    df_combined.copy()
+(results, best_name, pred_df, importances, all_forecasts,
+ y_test, feature_cols, df_model, le) = train_centralized(df_combined.copy())
+
+# Metrics table
+st.subheader("Model Comparison")
+metrics_data = []
+for name, res in results.items():
+    metrics_data.append({
+        "Model": name,
+        "MAE": f"{res['mae']:,.0f}",
+        "RMSE": f"{res['rmse']:,.0f}",
+        "R² Score": f"{res['r2']:.3f}",
+        "MAPE": f"{res['mape']:.1f}%",
+    })
+st.dataframe(pd.DataFrame(metrics_data), use_container_width=True, hide_index=True)
+st.success(f"Best model: **{best_name}** (R² = {results[best_name]['r2']:.3f})")
+
+# Predicted vs Actual
+st.subheader("Predicted vs Actual")
+col_a, col_b = st.columns(2)
+with col_a:
+    fig5, ax5 = plt.subplots(figsize=(7, 5))
+    y_pred_best = results[best_name]["predictions"]
+    ax5.scatter(y_test, y_pred_best, alpha=0.7, edgecolors="k", linewidth=0.5, s=80)
+    lims = [min(y_test.min(), y_pred_best.min()), max(y_test.max(), y_pred_best.max())]
+    ax5.plot(lims, lims, "r--", linewidth=2, label="Perfect Prediction")
+    ax5.set_xlabel("Actual (KSh M)")
+    ax5.set_ylabel("Predicted (KSh M)")
+    ax5.set_title(f"{best_name} — Predicted vs Actual")
+    ax5.legend()
+    ax5.grid(True, alpha=0.3)
+    fig5.tight_layout()
+    st.pyplot(fig5)
+    plt.close(fig5)
+with col_b:
+    st.markdown("**Prediction Details**")
+    st.dataframe(pred_df, use_container_width=True, hide_index=True)
+
+# Feature importance
+st.subheader("Feature Importance (Random Forest)")
+fig6, ax6 = plt.subplots(figsize=(10, 6))
+importances.head(10).sort_values().plot(kind="barh", color="steelblue", ax=ax6)
+ax6.set_title("Top 10 Features Driving Demand Predictions")
+ax6.set_xlabel("Importance")
+fig6.tight_layout()
+st.pyplot(fig6)
+plt.close(fig6)
+
+
+# ── 4. Federated vs Centralized ──────────────────────────────
+st.header("4. Federated vs Centralized Learning")
+st.markdown(
+    "To demonstrate the decentralized approach, we train **separate Random Forest "
+    "models per city** (local models) and combine predictions via **federated "
+    "averaging**. We then compare accuracy against the centralized model above."
 )
 
-# ── Local model results per city ──
+
+@st.cache_data
+def train_federated(df):
+    df = df.sort_values(["County", "Year"]).reset_index(drop=True)
+
+    for col in DEMAND_COLUMNS:
+        df[f"{col}_lag1"] = df.groupby("County")[col].shift(1)
+        df[f"{col}_lag2"] = df.groupby("County")[col].shift(2)
+    df["Road_Transport_growth"] = df.groupby("County")["Road Transport"].pct_change()
+    df["Year_index"] = df["Year"] - df["Year"].min()
+
+    feat_cols = ["Year", "Year_index", "Road_Transport_growth"]
+    feat_cols += [c for c in df.columns if "_lag1" in c or "_lag2" in c]
+
+    df_m = df.dropna(subset=feat_cols).copy()
+    train_mask = df_m["Year"] <= 2021
+    test_mask = df_m["Year"] >= 2022
+    counties = df["County"].unique().tolist()
+
+    # Per-city local models
+    local_results = {}
+    for county in counties:
+        c_train = df_m[train_mask & (df_m["County"] == county)]
+        c_test = df_m[test_mask & (df_m["County"] == county)]
+        if len(c_train) < 3 or len(c_test) == 0:
+            continue
+        X_tr, y_tr = c_train[feat_cols], c_train["Road Transport"]
+        X_te, y_te = c_test[feat_cols], c_test["Road Transport"]
+        m = RandomForestRegressor(n_estimators=200, max_depth=6, random_state=42)
+        m.fit(X_tr, y_tr)
+        preds = m.predict(X_te)
+        local_results[county] = {
+            "model": m,
+            "mae": mean_absolute_error(y_te, preds),
+            "rmse": np.sqrt(mean_squared_error(y_te, preds)),
+            "r2": r2_score(y_te, preds) if len(y_te) > 1 else 0.0,
+        }
+
+    # Federated average: each local model predicts, then average
+    fed_preds_all, fed_true_all = [], []
+    for county in counties:
+        c_test = df_m[test_mask & (df_m["County"] == county)]
+        if len(c_test) == 0:
+            continue
+        X_te = c_test[feat_cols]
+        y_te = c_test["Road Transport"]
+        all_preds = [r["model"].predict(X_te) for r in local_results.values()]
+        fed_pred = np.mean(all_preds, axis=0)
+        fed_preds_all.extend(fed_pred)
+        fed_true_all.extend(y_te.values)
+
+    fed_true = np.array(fed_true_all)
+    fed_pred = np.array(fed_preds_all)
+    fed_mae = mean_absolute_error(fed_true, fed_pred)
+    fed_rmse = np.sqrt(mean_squared_error(fed_true, fed_pred))
+    fed_r2 = r2_score(fed_true, fed_pred)
+
+    return local_results, fed_mae, fed_rmse, fed_r2
+
+
+local_results, fed_mae, fed_rmse, fed_r2 = train_federated(df_combined.copy())
+
+# Per-city local model table
 st.subheader("Local Model Performance (Per City)")
 local_rows = []
 for county, res in local_results.items():
@@ -409,58 +480,36 @@ for county, res in local_results.items():
     })
 st.dataframe(pd.DataFrame(local_rows), use_container_width=True, hide_index=True)
 
-# ── Federated vs Centralized comparison ──
-st.subheader("Federated vs Centralized Model Comparison")
+# Comparison table
+st.subheader("Federated vs Centralized — Head to Head")
+central_best = results[best_name]
 comp_rows = [
-    {"Approach": "Federated (averaged local models)",
-     "MAE": f"{fed_mae:,.0f}", "RMSE": f"{fed_rmse:,.0f}", "R²": f"{fed_r2:.3f}"},
     {"Approach": "Centralized (single global model)",
-     "MAE": f"{central_mae:,.0f}", "RMSE": f"{central_rmse:,.0f}", "R²": f"{central_r2:.3f}"},
+     "MAE": f"{central_best['mae']:,.0f}",
+     "RMSE": f"{central_best['rmse']:,.0f}",
+     "R²": f"{central_best['r2']:.3f}"},
+    {"Approach": "Federated (averaged local models)",
+     "MAE": f"{fed_mae:,.0f}",
+     "RMSE": f"{fed_rmse:,.0f}",
+     "R²": f"{fed_r2:.3f}"},
 ]
 st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
 
-if fed_r2 >= central_r2:
-    st.success("Federated model matches or outperforms the centralized model — "
-               "achieving good accuracy while keeping data decentralized!")
+if fed_r2 >= central_best["r2"]:
+    st.success(
+        "Federated model matches or outperforms centralized — achieving good "
+        "accuracy while keeping data decentralized!")
 else:
-    st.info("Centralized model has a slight edge, but federated learning "
-            "preserves data privacy with competitive accuracy.")
+    delta = central_best["r2"] - fed_r2
+    st.info(
+        f"Centralized model leads by R² {delta:.3f}, but federated learning "
+        f"preserves data privacy with competitive accuracy. With more data per "
+        f"city, the federated approach would close this gap.")
 
-# Feature importance
-st.subheader("Feature Importance")
-fig_imp, ax_imp = plt.subplots(figsize=(10, 6))
-importances.head(10).sort_values().plot(kind="barh", color="steelblue", ax=ax_imp)
-ax_imp.set_title("Top 10 Features Driving Demand Predictions")
-ax_imp.set_xlabel("Importance")
-fig_imp.tight_layout()
-st.pyplot(fig_imp)
-plt.close(fig_imp)
 
-# ── Section 4: Demand Patterns ───────────────────────────────
-st.header("4. Key Findings: Demand Patterns")
+# ── 5. Key Findings: Demand Patterns ─────────────────────────
+st.header("5. Key Findings: Demand Patterns")
 
-HOURLY_WEIGHTS = np.array([
-    0.005, 0.003, 0.002, 0.002, 0.005, 0.020,  # 0-5
-    0.060, 0.095, 0.090, 0.065, 0.050, 0.045,  # 6-11
-    0.050, 0.055, 0.045, 0.040, 0.055, 0.090,  # 12-17
-    0.085, 0.060, 0.040, 0.025, 0.015, 0.008,  # 18-23
-])
-HOURLY_WEIGHTS = HOURLY_WEIGHTS / HOURLY_WEIGHTS.sum()
-
-DAILY_WEIGHTS = np.array([1.10, 1.12, 1.08, 1.05, 1.15, 0.80, 0.70])  # Mon-Sun
-DAILY_WEIGHTS = DAILY_WEIGHTS / DAILY_WEIGHTS.sum()
-
-MONTHLY_WEIGHTS = np.array([
-    0.090, 0.075, 0.080, 0.095, 0.078, 0.072,
-    0.070, 0.082, 0.085, 0.088, 0.090, 0.095,
-])
-MONTHLY_WEIGHTS = MONTHLY_WEIGHTS / MONTHLY_WEIGHTS.sum()
-
-MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-# Key insight boxes matching slides
 pat_cols = st.columns(4)
 with pat_cols[0]:
     st.error("**Morning Peak**\n\n6–9 AM: Highest demand as commuters travel to work and school")
@@ -471,24 +520,37 @@ with pat_cols[2]:
 with pat_cols[3]:
     st.info("**Weekend Drop**\n\nLower demand compared to weekday patterns")
 
-# Interactive temporal explorer
+HOURLY_WEIGHTS = np.array([
+    0.005, 0.003, 0.002, 0.002, 0.005, 0.020,
+    0.060, 0.095, 0.090, 0.065, 0.050, 0.045,
+    0.050, 0.055, 0.045, 0.040, 0.055, 0.090,
+    0.085, 0.060, 0.040, 0.025, 0.015, 0.008,
+])
+HOURLY_WEIGHTS = HOURLY_WEIGHTS / HOURLY_WEIGHTS.sum()
+DAILY_WEIGHTS = np.array([1.10, 1.12, 1.08, 1.05, 1.15, 0.80, 0.70])
+DAILY_WEIGHTS = DAILY_WEIGHTS / DAILY_WEIGHTS.sum()
+MONTHLY_WEIGHTS = np.array([
+    0.090, 0.075, 0.080, 0.095, 0.078, 0.072,
+    0.070, 0.082, 0.085, 0.088, 0.090, 0.095,
+])
+MONTHLY_WEIGHTS = MONTHLY_WEIGHTS / MONTHLY_WEIGHTS.sum()
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
 st.subheader("Explore Demand by Time Period")
 st.caption(
-    "Annual data is distributed using Kenyan transport seasonality patterns "
+    "Annual data distributed using Kenyan transport seasonality patterns "
     "(school terms, holidays, rush hours, weekend drop-off)."
 )
-
 tcol1, tcol2, tcol3 = st.columns(3)
 with tcol1:
     temp_category = st.selectbox("Transport category:", DEMAND_COLUMNS, key="temp_cat")
 with tcol2:
     temp_granularity = st.selectbox(
-        "Time granularity:", ["Hourly", "Daily", "Monthly", "Weekly"], key="temp_gran"
-    )
+        "Time granularity:", ["Hourly", "Daily", "Monthly", "Weekly"], key="temp_gran")
 with tcol3:
-    temp_year = st.slider(
-        "Year:", int(df_combined["Year"].min()), 2027, 2024, key="temp_year"
-    )
+    temp_year = st.slider("Year:", int(df_combined["Year"].min()), 2027, 2024, key="temp_year")
 
 temp_unit = "KSh Millions" if temp_category == "Road Transport" else "Vehicles"
 
@@ -498,8 +560,7 @@ def build_temporal(df_src, all_fc, category, year, granularity):
     rows = []
     for county in df_src["County"].unique():
         county_actual = df_src[
-            (df_src["County"] == county) & (df_src["Year"] == year)
-        ]
+            (df_src["County"] == county) & (df_src["Year"] == year)]
         if len(county_actual) > 0:
             annual = county_actual[category].values[0]
         else:
@@ -509,7 +570,6 @@ def build_temporal(df_src, all_fc, category, year, granularity):
                 annual = fc_row["Predicted"].values[0] if len(fc_row) > 0 else 0
             else:
                 annual = 0
-
         if granularity == "Monthly":
             for m in range(12):
                 rows.append({"County": county, "Period": MONTH_NAMES[m],
@@ -517,10 +577,9 @@ def build_temporal(df_src, all_fc, category, year, granularity):
         elif granularity == "Weekly":
             weekly = annual / 52
             for w in range(1, 53):
-                month_idx = min(int((w - 1) / 4.33), 11)
-                seasonal = MONTHLY_WEIGHTS[month_idx] * 12
+                mi = min(int((w - 1) / 4.33), 11)
                 rows.append({"County": county, "Period": f"W{w}",
-                             "Value": weekly * seasonal, "Order": w})
+                             "Value": weekly * MONTHLY_WEIGHTS[mi] * 12, "Order": w})
         elif granularity == "Daily":
             daily_base = annual / 365
             for d in range(7):
@@ -534,9 +593,7 @@ def build_temporal(df_src, all_fc, category, year, granularity):
     return pd.DataFrame(rows)
 
 
-temporal_df = build_temporal(
-    df_combined, all_forecasts, temp_category, temp_year, temp_granularity
-)
+temporal_df = build_temporal(df_combined, all_forecasts, temp_category, temp_year, temp_granularity)
 
 if not temporal_df.empty:
     temporal_df = temporal_df.sort_values("Order")
@@ -545,12 +602,9 @@ if not temporal_df.empty:
         cdata = temporal_df[temporal_df["County"] == county]
         ax_t.plot(cdata["Period"], cdata["Value"], marker="o", linewidth=1.5,
                   label=county, markersize=4)
-
-    # Shade peak periods for hourly view
     if temp_granularity == "Hourly":
         ax_t.axvspan("06:00", "09:00", alpha=0.1, color="red", label="Morning Peak")
         ax_t.axvspan("15:00", "20:00", alpha=0.1, color="orange", label="Evening Peak")
-
     ax_t.set_title(f"{temp_category} — {temp_granularity} Estimate ({temp_year})", fontsize=14)
     ax_t.set_ylabel(f"{temp_category} ({temp_unit})")
     ax_t.legend(title="County")
@@ -561,32 +615,25 @@ if not temporal_df.empty:
     fig_t.tight_layout()
     st.pyplot(fig_t)
     plt.close(fig_t)
-
     with st.expander("View data table"):
-        pivot_temp = temporal_df.pivot(index="Period", columns="County", values="Value")
-        pivot_temp = pivot_temp.loc[
-            temporal_df.drop_duplicates("Period").sort_values("Order")["Period"]
-        ]
-        st.dataframe(pivot_temp.round(0), use_container_width=True)
+        piv = temporal_df.pivot(index="Period", columns="County", values="Value")
+        piv = piv.loc[temporal_df.drop_duplicates("Period").sort_values("Order")["Period"]]
+        st.dataframe(piv.round(0), use_container_width=True)
 else:
     st.warning("No data available for the selected year.")
 
 
-# ── Section 5: City-by-City Demand Analysis ──────────────────
-st.header("5. City-by-City Demand Analysis")
+# ── 6. City-by-City Demand Analysis ─────────────────────────
+st.header("6. City-by-City Demand Analysis")
 st.markdown(
     "Population and time of day are the most important factors influencing demand. "
     "Larger cities like Nairobi naturally show higher demand due to greater "
     "population density and economic activity."
 )
-
-cba_category = st.selectbox(
-    "Select transport category:", DEMAND_COLUMNS, key="cba_cat"
-)
+cba_category = st.selectbox("Select transport category:", DEMAND_COLUMNS, key="cba_cat")
 cba_unit = "KSh Millions" if cba_category == "Road Transport" else "Vehicles"
 latest_year = int(df_combined["Year"].max())
 
-# Ranked bar chart of latest year
 city_vals = []
 for county in df_combined["County"].unique():
     row = df_combined[(df_combined["County"] == county) & (df_combined["Year"] == latest_year)]
@@ -605,12 +652,11 @@ st.pyplot(fig_cba)
 plt.close(fig_cba)
 
 
-# ── Section 6: Demand Forecast ───────────────────────────────
-st.header("6. Demand Forecast (2025–2027)")
+# ── 7. Demand Forecast (2025–2027) ──────────────────────────
+st.header("7. Demand Forecast (2025–2027)")
 
 forecast_category = st.selectbox(
-    "Select transport category to forecast:", DEMAND_COLUMNS, key="forecast_cat"
-)
+    "Select transport category to forecast:", DEMAND_COLUMNS, key="forecast_cat")
 forecast_df = all_forecasts[forecast_category]
 f_unit = "KSh Millions" if forecast_category == "Road Transport" else "Vehicles"
 
@@ -626,7 +672,7 @@ for county in df_combined["County"].unique():
     ax7.plot(fore["Year"], fore["Predicted"], marker="s",
              linewidth=2, linestyle="--", alpha=0.7)
 ax7.axvline(x=2024.5, color="gray", linestyle=":", alpha=0.5, label="Forecast boundary")
-ax7.set_title(f"{forecast_category}: Historical + Forecast (Federated Model)")
+ax7.set_title(f"{forecast_category}: Historical + Forecast")
 ax7.set_xlabel("Year")
 ax7.set_ylabel(f"{forecast_category} ({f_unit})")
 ax7.legend(title="County", bbox_to_anchor=(1.05, 1), loc="upper left")
@@ -636,12 +682,11 @@ st.pyplot(fig7)
 plt.close(fig7)
 
 
-# ── Section 7: Comparative Analysis ──────────────────────────
-st.header("7. Comparative Analysis — County Rankings & Trends")
+# ── 8. Comparative Analysis ─────────────────────────────────
+st.header("8. Comparative Analysis — County Rankings & Trends")
 
 comp_category = st.selectbox(
-    "Select transport category for comparison:", DEMAND_COLUMNS, key="comp_cat"
-)
+    "Select transport category for comparison:", DEMAND_COLUMNS, key="comp_cat")
 comp_unit = "KSh Millions" if comp_category == "Road Transport" else "Vehicles"
 forecast_year = 2027
 
@@ -657,10 +702,8 @@ def build_comparison(df_src, all_fc, category, base_yr, target_yr):
         val_future = fc_row["Predicted"].values[0] if len(fc_row) > 0 else 0
         change_pct = ((val_future - val_now) / val_now * 100) if val_now != 0 else 0
         rows.append({
-            "County": county,
-            f"{base_yr} Actual": int(val_now),
-            f"{target_yr} Forecast": int(val_future),
-            "Change (%)": round(change_pct, 1),
+            "County": county, f"{base_yr} Actual": int(val_now),
+            f"{target_yr} Forecast": int(val_future), "Change (%)": round(change_pct, 1),
         })
     comp = pd.DataFrame(rows)
     comp = comp.sort_values(f"{base_yr} Actual", ascending=False).reset_index(drop=True)
@@ -676,17 +719,13 @@ st.subheader(f"County Rankings — {comp_category}")
 
 def style_trend(val):
     if isinstance(val, (int, float)):
-        if val > 0:
-            return "color: green"
-        elif val < 0:
-            return "color: red"
+        return "color: green" if val > 0 else ("color: red" if val < 0 else "")
     return ""
 
 
 styled = comp_df.style.applymap(style_trend, subset=["Change (%)"])
 st.dataframe(styled, use_container_width=True)
 
-# Side-by-side bar chart
 fig9, ax9 = plt.subplots(figsize=(12, 6))
 x = np.arange(len(comp_df))
 width = 0.35
@@ -704,12 +743,10 @@ ax9.grid(True, alpha=0.3, axis="y")
 for i, row in comp_df.iterrows():
     change = row["Change (%)"]
     arrow = "+" if change > 0 else ""
-    ax9.annotate(
-        f"{arrow}{change:.1f}%",
-        xy=(i - 1 + width / 2, row[f"{forecast_year} Forecast"]),
-        ha="center", va="bottom", fontsize=9, fontweight="bold",
-        color="green" if change > 0 else "red",
-    )
+    ax9.annotate(f"{arrow}{change:.1f}%",
+                 xy=(i - 1 + width / 2, row[f"{forecast_year} Forecast"]),
+                 ha="center", va="bottom", fontsize=9, fontweight="bold",
+                 color="green" if change > 0 else "red")
 fig9.tight_layout()
 st.pyplot(fig9)
 plt.close(fig9)
@@ -736,8 +773,7 @@ def build_trend_matrix(df_src, all_fc, cats, base_yr, target_yr):
 
 
 trend_matrix = build_trend_matrix(
-    df_combined, all_forecasts, DEMAND_COLUMNS, latest_year, forecast_year
-)
+    df_combined, all_forecasts, DEMAND_COLUMNS, latest_year, forecast_year)
 trend_matrix.index.name = "Category"
 
 
@@ -754,15 +790,14 @@ def color_cells(val):
 
 st.markdown(
     f"Percentage change from **{latest_year}** to **{forecast_year}** forecast. "
-    "Green = growth (>5%), Red = decline (>5%), Yellow = stable."
-)
+    "Green = growth (>5%), Red = decline (>5%), Yellow = stable.")
 st.dataframe(
     trend_matrix.style.applymap(color_cells).format("{:+.1f}%"),
-    use_container_width=True,
-)
+    use_container_width=True)
 
-# ── Section 8: Challenges & Conclusion ───────────────────────
-st.header("8. Challenges & Future Directions")
+
+# ── 9. Challenges & Conclusion ──────────────────────────────
+st.header("9. Challenges & Future Directions")
 
 ch_cols = st.columns(3)
 with ch_cols[0]:
@@ -778,12 +813,13 @@ with ch_cols[2]:
 st.subheader("Conclusion")
 st.markdown(
     "Decentralized machine learning is effective for predicting transport demand. "
-    "It improves accuracy, protects data privacy, and can help planners optimize "
-    "transport systems."
+    "It achieves competitive accuracy against centralized approaches while "
+    "protecting data privacy and enabling scalable city-level deployment."
 )
 conc_cols = st.columns(3)
 with conc_cols[0]:
-    st.success("**Current Success**\n\nAccurate demand prediction using federated learning")
+    st.success("**Current Success**\n\nAccurate demand prediction with both "
+               "centralized and federated approaches")
 with conc_cols[1]:
     st.info("**Real-Time Data**\n\nExpand using real-time operational data (GTFS)")
 with conc_cols[2]:
