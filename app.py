@@ -407,6 +407,285 @@ fig7.tight_layout()
 st.pyplot(fig7)
 plt.close(fig7)
 
+# ── Section 5: Temporal Demand Estimation ─────────────────────
+st.header("5. Estimated Demand by Time Period")
+st.caption(
+    "The source data is annual. Monthly, weekly, daily, and hourly estimates are "
+    "derived using Kenyan transport seasonality patterns (school terms, holidays, "
+    "rainy seasons, rush hours)."
+)
+
+# Seasonality weights — based on Kenya school calendar, holidays, weather
+MONTHLY_WEIGHTS = np.array([
+    0.090,  # Jan - holiday travel tail, back to school
+    0.075,  # Feb - short month, relatively low
+    0.080,  # Mar - normal
+    0.095,  # Apr - Easter, long rains start (higher matatu demand)
+    0.078,  # May - long rains, slightly lower
+    0.072,  # Jun - cool/dry, relatively calm
+    0.070,  # Jul - lowest, mid-year school break lull
+    0.082,  # Aug - school resumes, uptick
+    0.085,  # Sep - normal
+    0.088,  # Oct - short rains begin
+    0.090,  # Nov - picking up toward December
+    0.095,  # Dec - peak — holiday travel, festivities
+])
+MONTHLY_WEIGHTS = MONTHLY_WEIGHTS / MONTHLY_WEIGHTS.sum()  # normalize
+
+DAILY_WEIGHTS = np.array([1.10, 1.12, 1.08, 1.05, 1.15, 0.80, 0.70])  # Mon-Sun
+DAILY_WEIGHTS = DAILY_WEIGHTS / DAILY_WEIGHTS.sum()
+
+HOURLY_WEIGHTS = np.array([
+    0.005, 0.003, 0.002, 0.002, 0.005, 0.020,  # 0-5
+    0.060, 0.095, 0.090, 0.065, 0.050, 0.045,  # 6-11
+    0.050, 0.055, 0.045, 0.040, 0.055, 0.090,  # 12-17
+    0.085, 0.060, 0.040, 0.025, 0.015, 0.008,  # 18-23
+])
+HOURLY_WEIGHTS = HOURLY_WEIGHTS / HOURLY_WEIGHTS.sum()
+
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+temp_col1, temp_col2 = st.columns(2)
+with temp_col1:
+    temp_category = st.selectbox(
+        "Transport category:", demand_columns, key="temp_cat"
+    )
+with temp_col2:
+    temp_granularity = st.selectbox(
+        "Time granularity:", ["Monthly", "Weekly", "Daily", "Hourly"], key="temp_gran"
+    )
+
+temp_year = st.slider(
+    "Select year:", int(df_combined["Year"].min()), 2027, 2024, key="temp_year"
+)
+
+# Get annual value per county for selected year
+temp_unit = "KSh Millions" if temp_category == "Road Transport" else "Vehicles"
+
+
+@st.cache_data
+def build_temporal(df_src, all_fc, category, year, granularity):
+    rows = []
+    for county in df_src["County"].unique():
+        # Get annual total: from actual data or forecast
+        county_actual = df_src[
+            (df_src["County"] == county) & (df_src["Year"] == year)
+        ]
+        if len(county_actual) > 0:
+            annual = county_actual[category].values[0]
+        else:
+            fc = all_fc.get(category)
+            if fc is not None:
+                fc_row = fc[(fc["County"] == county) & (fc["Year"] == year)]
+                annual = fc_row["Predicted"].values[0] if len(fc_row) > 0 else 0
+            else:
+                annual = 0
+
+        if granularity == "Monthly":
+            for m in range(12):
+                rows.append({
+                    "County": county, "Period": MONTH_NAMES[m],
+                    "Value": annual * MONTHLY_WEIGHTS[m], "Order": m,
+                })
+        elif granularity == "Weekly":
+            weekly = annual / 52
+            for w in range(1, 53):
+                month_idx = min(int((w - 1) / 4.33), 11)
+                seasonal = MONTHLY_WEIGHTS[month_idx] * 12
+                rows.append({
+                    "County": county, "Period": f"W{w}",
+                    "Value": weekly * seasonal, "Order": w,
+                })
+        elif granularity == "Daily":
+            daily_base = annual / 365
+            for d in range(7):
+                rows.append({
+                    "County": county, "Period": DAY_NAMES[d],
+                    "Value": daily_base * DAILY_WEIGHTS[d] * 7, "Order": d,
+                })
+        elif granularity == "Hourly":
+            daily_avg = annual / 365
+            for h in range(24):
+                rows.append({
+                    "County": county, "Period": f"{h:02d}:00",
+                    "Value": daily_avg * HOURLY_WEIGHTS[h] * 24, "Order": h,
+                })
+    return pd.DataFrame(rows)
+
+
+temporal_df = build_temporal(df_combined, all_forecasts, temp_category, temp_year, temp_granularity)
+
+if not temporal_df.empty:
+    temporal_df = temporal_df.sort_values("Order")
+
+    fig8, ax8 = plt.subplots(figsize=(14, 6))
+    for county in temporal_df["County"].unique():
+        cdata = temporal_df[temporal_df["County"] == county]
+        ax8.plot(cdata["Period"], cdata["Value"], marker="o", linewidth=1.5,
+                 label=county, markersize=4)
+    ax8.set_title(f"{temp_category} — {temp_granularity} Estimate ({temp_year})", fontsize=14)
+    ax8.set_xlabel(temp_granularity.rstrip("ly") + " Period")
+    ax8.set_ylabel(f"{temp_category} ({temp_unit})")
+    ax8.legend(title="County")
+    ax8.grid(True, alpha=0.3)
+    if temp_granularity == "Weekly":
+        ax8.set_xticks(ax8.get_xticks()[::4])
+    ax8.tick_params(axis="x", rotation=45)
+    fig8.tight_layout()
+    st.pyplot(fig8)
+    plt.close(fig8)
+
+    with st.expander("View data table"):
+        pivot_temp = temporal_df.pivot(index="Period", columns="County", values="Value")
+        pivot_temp = pivot_temp.loc[
+            temporal_df.drop_duplicates("Period").sort_values("Order")["Period"]
+        ]
+        st.dataframe(pivot_temp.round(0), use_container_width=True)
+else:
+    st.warning("No data available for the selected year.")
+
+
+# ── Section 6: Comparative Analysis ──────────────────────────
+st.header("6. Comparative Analysis — County Rankings & Trends")
+
+comp_category = st.selectbox(
+    "Select transport category for comparison:",
+    demand_columns,
+    key="comp_cat",
+)
+
+comp_unit = "KSh Millions" if comp_category == "Road Transport" else "Vehicles"
+
+# Build ranking table: latest actual (2024) vs forecast (2027)
+latest_year = int(df_combined["Year"].max())
+forecast_year = 2027
+
+
+@st.cache_data
+def build_comparison(df_src, all_fc, category, base_yr, target_yr):
+    rows = []
+    for county in df_src["County"].unique():
+        actual = df_src[(df_src["County"] == county) & (df_src["Year"] == base_yr)]
+        val_now = actual[category].values[0] if len(actual) > 0 else 0
+
+        fc = all_fc.get(category)
+        fc_row = fc[(fc["County"] == county) & (fc["Year"] == target_yr)] if fc is not None else pd.DataFrame()
+        val_future = fc_row["Predicted"].values[0] if len(fc_row) > 0 else 0
+
+        change_pct = ((val_future - val_now) / val_now * 100) if val_now != 0 else 0
+
+        rows.append({
+            "County": county,
+            f"{base_yr} Actual": int(val_now),
+            f"{target_yr} Forecast": int(val_future),
+            "Change (%)": round(change_pct, 1),
+        })
+
+    comp = pd.DataFrame(rows)
+    comp = comp.sort_values(f"{base_yr} Actual", ascending=False).reset_index(drop=True)
+    comp.index = comp.index + 1
+    comp.index.name = "Rank"
+    return comp
+
+
+comp_df = build_comparison(df_combined, all_forecasts, comp_category, latest_year, forecast_year)
+
+# Display with trend indicators
+st.subheader(f"County Rankings — {comp_category}")
+
+def style_trend(val):
+    if isinstance(val, (int, float)):
+        if val > 0:
+            return "color: green"
+        elif val < 0:
+            return "color: red"
+    return ""
+
+styled = comp_df.style.applymap(style_trend, subset=["Change (%)"])
+st.dataframe(styled, use_container_width=True)
+
+# Side-by-side bar chart
+st.subheader(f"{latest_year} vs {forecast_year} — {comp_category}")
+
+fig9, ax9 = plt.subplots(figsize=(12, 6))
+x = np.arange(len(comp_df))
+width = 0.35
+bars1 = ax9.bar(x - width / 2, comp_df[f"{latest_year} Actual"], width,
+                label=f"{latest_year} Actual", color="steelblue")
+bars2 = ax9.bar(x + width / 2, comp_df[f"{forecast_year} Forecast"], width,
+                label=f"{forecast_year} Forecast", color="coral")
+ax9.set_xlabel("County")
+ax9.set_ylabel(f"{comp_category} ({comp_unit})")
+ax9.set_title(f"{comp_category}: Current vs Forecast by County")
+ax9.set_xticks(x)
+ax9.set_xticklabels(comp_df["County"], rotation=30)
+ax9.legend()
+ax9.grid(True, alpha=0.3, axis="y")
+
+# Add trend arrows on bars
+for i, row in comp_df.iterrows():
+    change = row["Change (%)"]
+    arrow = "+" if change > 0 else ""
+    ax9.annotate(
+        f"{arrow}{change:.1f}%",
+        xy=(i - 1 + width / 2, row[f"{forecast_year} Forecast"]),
+        ha="center", va="bottom", fontsize=9, fontweight="bold",
+        color="green" if change > 0 else "red",
+    )
+
+fig9.tight_layout()
+st.pyplot(fig9)
+plt.close(fig9)
+
+# Trend summary across ALL categories
+st.subheader("Trend Summary — All Categories")
+
+
+@st.cache_data
+def build_trend_matrix(df_src, all_fc, cats, base_yr, target_yr):
+    matrix = {}
+    for cat in cats:
+        cat_trends = {}
+        for county in df_src["County"].unique():
+            actual = df_src[(df_src["County"] == county) & (df_src["Year"] == base_yr)]
+            val_now = actual[cat].values[0] if len(actual) > 0 else 0
+            fc = all_fc.get(cat)
+            fc_row = fc[(fc["County"] == county) & (fc["Year"] == target_yr)] if fc is not None else pd.DataFrame()
+            val_future = fc_row["Predicted"].values[0] if len(fc_row) > 0 else 0
+            change = ((val_future - val_now) / val_now * 100) if val_now != 0 else 0
+            cat_trends[county] = round(change, 1)
+        matrix[cat] = cat_trends
+    return pd.DataFrame(matrix).T
+
+
+trend_matrix = build_trend_matrix(
+    df_combined, all_forecasts, demand_columns, latest_year, forecast_year
+)
+trend_matrix.index.name = "Category"
+
+
+def color_cells(val):
+    if isinstance(val, (int, float)):
+        if val > 5:
+            return "background-color: #d4edda; color: #155724"
+        elif val < -5:
+            return "background-color: #f8d7da; color: #721c24"
+        else:
+            return "background-color: #fff3cd; color: #856404"
+    return ""
+
+
+st.markdown(
+    f"Percentage change from **{latest_year}** to **{forecast_year}** forecast. "
+    "Green = growth (>5%), Red = decline (>5%), Yellow = stable."
+)
+st.dataframe(
+    trend_matrix.style.applymap(color_cells).format("{:+.1f}%"),
+    use_container_width=True,
+)
+
 # ── Footer ───────────────────────────────────────────────────
 st.divider()
 st.markdown(
